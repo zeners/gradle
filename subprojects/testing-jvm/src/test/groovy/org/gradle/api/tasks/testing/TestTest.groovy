@@ -23,6 +23,7 @@ import org.gradle.api.internal.file.TestFiles
 import org.gradle.api.internal.provider.AbstractProperty
 import org.gradle.test.fixtures.AbstractProjectBuilderSpec
 import org.gradle.util.TestUtil
+import org.gradle.util.internal.CollectionUtils
 
 class TestTest extends AbstractProjectBuilderSpec {
 
@@ -76,5 +77,39 @@ class TestTest extends AbstractProjectBuilderSpec {
         def e = thrown(AbstractProperty.PropertyQueryException)
         assertHasMatchingCause(e, m -> m.startsWith("Toolchain installation '${invalidJavac.parentFile.parentFile.absolutePath}' could not be probed:"))
         assertHasMatchingCause(e, m -> m ==~ /Cannot run program .*java.*/)
+    }
+
+    def 'fails, if executed tasks not correctly sorted by estimated runtime'() {
+        Test testTask = project.tasks.create('test', Test)
+
+        def durations = [
+            TestClassTwo: 2L,
+            TestClassOne: 1L,
+            TestClassThree: 3L
+        ]
+        def testRuns = ['TestClassTwo', 'TestClassThree', 'TestClassOne', 'TestClassUnknown'] as LinkedHashSet
+
+        when:
+        testTask.estimatedTestClassDurations.set durations
+        testTask.maxParallelForks = 2
+
+        def strategy = testTask.sortAndAssignStrategyFactory.create()
+        strategy.maxProcessorsUsed  2
+
+        def sorted = CollectionUtils.sort testRuns, strategy.sorter
+
+        strategy.assign('A') == 0  // -> fallback round robin
+        strategy.assign('TestClassThree') == 0          // -> sorted -> process 0: 0 > 3
+        strategy.assign('B') == 1  // -> fallback round robin
+        strategy.assign('TestClassTwo') == 1            // -> sorted -> process 1: 0 > 2
+        strategy.assign('TestClassOne') == 1            // -> sorted -> process 1: 2 > 3
+
+        then:
+        strategy instanceof TestClassSortAndAssignStrategy.WellKnown.DurationSortedRoundRobinFallBack
+        sorted.size() == 4
+        sorted[0] == 'TestClassUnknown'
+        sorted[1] == 'TestClassThree'
+        sorted[2] == 'TestClassTwo'
+        sorted[3] == 'TestClassOne'
     }
 }

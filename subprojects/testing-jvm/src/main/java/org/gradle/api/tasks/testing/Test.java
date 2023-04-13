@@ -46,6 +46,7 @@ import org.gradle.api.internal.tasks.testing.testng.TestNGTestFramework;
 import org.gradle.api.internal.tasks.testing.worker.TestWorker;
 import org.gradle.api.jvm.ModularitySpec;
 import org.gradle.api.model.ObjectFactory;
+import org.gradle.api.provider.MapProperty;
 import org.gradle.api.provider.Property;
 import org.gradle.api.provider.Provider;
 import org.gradle.api.provider.ProviderFactory;
@@ -91,10 +92,12 @@ import org.gradle.process.internal.JavaForkOptionsFactory;
 import org.gradle.process.internal.worker.WorkerProcessFactory;
 import org.gradle.util.internal.ConfigureUtil;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 import java.io.File;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -171,6 +174,7 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
     private final JavaForkOptions forkOptions;
     private final ModularitySpec modularity;
     private final Property<JavaLauncher> javaLauncher;
+    private final MapProperty<String, Long> estimatedTestClassDurations;
 
     private FileCollection testClassesDirs;
     private final PatternFilterable patternSet;
@@ -204,6 +208,12 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
         getDryRun().convention(false);
         testFramework = objectFactory.property(TestFramework.class).convention(new JUnitTestFramework(this, (DefaultTestFilter) getFilter(), true));
         allowTestClassStealing = objectFactory.property(Boolean.class).convention(Providers.TRUE);
+        estimatedTestClassDurations = objectFactory.mapProperty(String.class, Long.class).convention(getProviderFactory().provider(new Callable<Map<String, Long>>() {
+            @Override
+            public Map<String, Long> call() {
+                return buildLastRunDurations();
+            }
+        }));
     }
 
     private Provider<JavaLauncher> createJavaLauncherConvention() {
@@ -235,7 +245,6 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
      * Only used in parallel scenarios and if supported by the testFramework
      *
      * @return true, if idle processors can steal work not startet from busy processors, otherwise false
-     *
      * @since 8.4
      */
     @Internal
@@ -744,10 +753,53 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
                 getServices().get(StartParameter.class).getMaxWorkerCount(),
                 getServices().get(Clock.class),
                 getServices().get(DocumentationRegistry.class),
-                (DefaultTestFilter) getFilter());
+                (DefaultTestFilter) getFilter(),
+                getSortAndAssignStrategyFactory());
         } else {
             return testExecuter;
         }
+    }
+
+    /**
+     * sorting and assigning defaults in non-parallel execution to {@link TestClassSortAndAssignStrategy.WellKnown#UNSORTED_ROUND_ROBIN UNSORTED_ROUND_ROBIN}<br>
+     * only if test-durations are provided, it will sort shorter test classes to the end to optimize overall run time
+     *
+     * @return strategy for sorting test classes and assigning it to processors
+     * @since 8.2
+     */
+    @Incubating
+    @Internal
+    @Nonnull
+    protected TestClassSortAndAssignStrategy.StrategyFactory getSortAndAssignStrategyFactory(){
+        if (allowTestClassStealing.get() == Boolean.TRUE && getMaxParallelForks() > 1) {
+            final Map<String, Long> durations = estimatedTestClassDurations.get();
+            if (durations.size() > getMaxParallelForks()) {
+                return TestClassSortAndAssignStrategy.WellKnown.sortByDurations(durations);
+            }
+        }
+        return TestClassSortAndAssignStrategy.WellKnown.UNSORTED_ROUND_ROBIN;
+    }
+
+    /**
+     * compute estimated duration per test class name
+     *
+     * @return Map of estimated durations, build from last test run
+     * @since 8.2
+     */
+    @Nonnull
+    @Incubating
+    protected Map<String, Long> buildLastRunDurations() {
+        final Map<String, Long> durations = new HashMap<String, Long>();
+        TestResultSerializer serializer = new TestResultSerializer(getBinaryResultsDirectory().getAsFile().get());
+        if (serializer.isHasResults()) {
+            serializer.read(new Action<TestClassResult>() {
+                @Override
+                public void execute(TestClassResult testClassResult) {
+                    durations.put(testClassResult.getClassName(), testClassResult.getDuration());
+                }
+            });
+        }
+        return durations;
     }
 
     @Override
@@ -1104,8 +1156,6 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
      * If we are setting a framework to its existing value, no-op so as not to overwrite existing options here.
      * We need to allow this especially for the default test task, so that existing builds that configure options and
      * then call useJunit() don't clear out their options.
-     *
-     * @param testFramework
      */
     void useTestFramework(TestFramework testFramework) {
         Class<?> currentFramework = this.testFramework.get().getClass();
@@ -1296,6 +1346,20 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
         return javaLauncher;
     }
 
+    /**
+     * estimated runtime of test classes, used for sorting and processor-assigning of test classes<br>
+     * used for optimized performance (long-running test-classes first, so no long-running test class processed at the end)<br>
+     * default build from last test output from {@link #getBinaryResultsDirectory()}
+     *
+     * @return Property with a map of estimated test class runtime per test class
+     * @since 8.2
+     */
+    @Internal
+    @Incubating
+    public MapProperty<String, Long> getEstimatedTestClassDurations() {
+        return estimatedTestClassDurations;
+    }
+
     @Inject
     protected ObjectFactory getObjectFactory() {
         throw new UnsupportedOperationException();
@@ -1340,4 +1404,5 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
     protected JavaModuleDetector getJavaModuleDetector() {
         throw new UnsupportedOperationException();
     }
+
 }

@@ -37,6 +37,7 @@ import org.gradle.api.internal.tasks.testing.worker.ForkedTestClasspath;
 import org.gradle.api.internal.tasks.testing.worker.ForkingTestClassProcessor;
 import org.gradle.api.logging.Logger;
 import org.gradle.api.logging.Logging;
+import org.gradle.api.tasks.testing.TestClassSortAndAssignStrategy;
 import org.gradle.internal.Factory;
 import org.gradle.internal.actor.ActorFactory;
 import org.gradle.internal.time.Clock;
@@ -61,12 +62,14 @@ public class DefaultTestExecuter implements TestExecuter<JvmTestExecutionSpec> {
     private final Clock clock;
     private final DocumentationRegistry documentationRegistry;
     private final DefaultTestFilter testFilter;
+    private final TestClassSortAndAssignStrategy.StrategyFactory sortAndAssignStrategyFactory;
     private TestClassProcessor processor;
 
     public DefaultTestExecuter(
         WorkerProcessFactory workerFactory, ActorFactory actorFactory, ModuleRegistry moduleRegistry,
         WorkerLeaseService workerLeaseService, int maxWorkerCount,
-        Clock clock, DocumentationRegistry documentationRegistry, DefaultTestFilter testFilter
+        Clock clock, DocumentationRegistry documentationRegistry, DefaultTestFilter testFilter,
+        TestClassSortAndAssignStrategy.StrategyFactory sortAndAssignStrategyFactory
     ) {
         this.workerFactory = workerFactory;
         this.actorFactory = actorFactory;
@@ -76,6 +79,7 @@ public class DefaultTestExecuter implements TestExecuter<JvmTestExecutionSpec> {
         this.clock = clock;
         this.documentationRegistry = documentationRegistry;
         this.testFilter = testFilter;
+        this.sortAndAssignStrategyFactory = sortAndAssignStrategyFactory;
     }
 
     @Override
@@ -104,10 +108,17 @@ public class DefaultTestExecuter implements TestExecuter<JvmTestExecutionSpec> {
                 return new RestartEveryNTestClassProcessor(forkingProcessorFactory, testExecutionSpec.getForkEvery());
             }
         };
+        TestClassSortAndAssignStrategy sortAndAssignStrategy = sortAndAssignStrategyFactory.create();
+        if (sortAndAssignStrategy == null || maxParallelForks == 1 && !sortAndAssignStrategy.isFallBack()) {
+            LOGGER.info("{}, so falling back to UNSORTED_ROUND_ROBIN", sortAndAssignStrategy == null ? "no sortAndAssignStrategy generated" : "sequential run");
+            sortAndAssignStrategy = TestClassSortAndAssignStrategy.WellKnown.UNSORTED_ROUND_ROBIN.create();
+        } else {
+            LOGGER.info("use {} as sortAndAssignStrategy", sortAndAssignStrategy.getClass().getSimpleName());
+        }
         processor =
             new PatternMatchTestClassProcessor(testFilter,
-                new RunPreviousFailedFirstTestClassProcessor(testExecutionSpec.getPreviousFailedTestClasses(),
-                    new MaxNParallelTestClassProcessor(maxParallelForks, reforkingProcessorFactory, actorFactory)));
+                new RunPreviousFailedFirstTestClassProcessor(testExecutionSpec.getPreviousFailedTestClasses(), sortAndAssignStrategy,
+                    new MaxNParallelTestClassProcessor(maxParallelForks, reforkingProcessorFactory, actorFactory, sortAndAssignStrategy)));
 
         final FileTree testClassFiles = testExecutionSpec.getCandidateClassFiles();
 

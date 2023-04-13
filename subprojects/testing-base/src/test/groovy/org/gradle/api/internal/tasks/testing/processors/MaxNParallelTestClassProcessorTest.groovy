@@ -19,6 +19,7 @@ package org.gradle.api.internal.tasks.testing.processors
 import org.gradle.api.internal.tasks.testing.TestClassProcessor
 import org.gradle.api.internal.tasks.testing.TestClassRunInfo
 import org.gradle.api.internal.tasks.testing.TestResultProcessor
+import org.gradle.api.tasks.testing.TestClassSortAndAssignStrategy
 import org.gradle.internal.actor.Actor
 import org.gradle.internal.actor.ActorFactory
 import spock.lang.Specification
@@ -30,7 +31,7 @@ class MaxNParallelTestClassProcessorTest extends Specification {
     private final TestResultProcessor asyncResultProcessor = Mock()
     private final Actor resultProcessorActor = Mock()
     private final ActorFactory actorFactory = Mock()
-    private final MaxNParallelTestClassProcessor processor = new MaxNParallelTestClassProcessor(2, factory, actorFactory)
+    private final MaxNParallelTestClassProcessor processor = new MaxNParallelTestClassProcessor(2, factory, actorFactory, TestClassSortAndAssignStrategy.WellKnown.UNSORTED_ROUND_ROBIN.create())
 
     def createsThreadSafeWrapperForResultProcessorOnStart() {
         when:

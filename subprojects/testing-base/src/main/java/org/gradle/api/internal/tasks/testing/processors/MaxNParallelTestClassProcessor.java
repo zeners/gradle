@@ -19,6 +19,7 @@ package org.gradle.api.internal.tasks.testing.processors;
 import org.gradle.api.internal.tasks.testing.TestClassProcessor;
 import org.gradle.api.internal.tasks.testing.TestClassRunInfo;
 import org.gradle.api.internal.tasks.testing.TestResultProcessor;
+import org.gradle.api.tasks.testing.TestClassSortAndAssignStrategy;
 import org.gradle.internal.Factory;
 import org.gradle.internal.UncheckedException;
 import org.gradle.internal.actor.Actor;
@@ -37,18 +38,19 @@ public class MaxNParallelTestClassProcessor implements TestClassProcessor {
     private final int maxProcessors;
     private final Factory<TestClassProcessor> factory;
     private final ActorFactory actorFactory;
+    private final TestClassSortAndAssignStrategy sortAndAssignStrategy;
     private TestResultProcessor resultProcessor;
-    private int pos;
-    private List<TestClassProcessor> processors = new ArrayList<TestClassProcessor>();
-    private List<TestClassProcessor> rawProcessors = new ArrayList<TestClassProcessor>();
-    private List<Actor> actors = new ArrayList<Actor>();
+    private final List<TestClassProcessor> processors = new ArrayList<TestClassProcessor>();
+    private final List<TestClassProcessor> rawProcessors = new ArrayList<TestClassProcessor>();
+    private final List<Actor> actors = new ArrayList<Actor>();
     private Actor resultProcessorActor;
     private volatile boolean stoppedNow;
 
-    public MaxNParallelTestClassProcessor(int maxProcessors, Factory<TestClassProcessor> factory, ActorFactory actorFactory) {
+    public MaxNParallelTestClassProcessor(int maxProcessors, Factory<TestClassProcessor> factory, ActorFactory actorFactory, TestClassSortAndAssignStrategy sortAndAssignStrategy) {
         this.maxProcessors = maxProcessors;
         this.factory = factory;
         this.actorFactory = actorFactory;
+        this.sortAndAssignStrategy = sortAndAssignStrategy;
     }
 
     @Override
@@ -56,6 +58,7 @@ public class MaxNParallelTestClassProcessor implements TestClassProcessor {
         // Create a processor that processes events in its own thread
         resultProcessorActor = actorFactory.createActor(resultProcessor);
         this.resultProcessor = resultProcessorActor.getProxy(TestResultProcessor.class);
+        sortAndAssignStrategy.maxProcessorsUsed(maxProcessors);
     }
 
     @Override
@@ -65,7 +68,8 @@ public class MaxNParallelTestClassProcessor implements TestClassProcessor {
         }
 
         TestClassProcessor processor;
-        if (processors.size() < maxProcessors) {
+        final int index = Math.min(Math.max(sortAndAssignStrategy.assign(testClass.getTestClassName()), 0), maxProcessors - 1);
+        if (index >= processors.size()) {
             processor = factory.create();
             rawProcessors.add(processor);
             Actor actor = actorFactory.createActor(processor);
@@ -74,8 +78,7 @@ public class MaxNParallelTestClassProcessor implements TestClassProcessor {
             processors.add(processor);
             processor.startProcessing(resultProcessor);
         } else {
-            processor = processors.get(pos);
-            pos = (pos + 1) % processors.size();
+            processor = processors.get(index);
         }
         processor.processTestClass(testClass);
     }
