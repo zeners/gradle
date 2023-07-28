@@ -34,6 +34,7 @@ import java.lang.reflect.Constructor;
  */
 class JUnitPlatformTestClassProcessorFactory implements WorkerTestClassProcessorFactory, Serializable {
     private final JUnitPlatformSpec spec;
+    private RemoteTestClassStealer stealer =null;
 
     JUnitPlatformTestClassProcessorFactory(JUnitPlatformSpec spec) {
         this.spec = spec;
@@ -46,8 +47,8 @@ class JUnitPlatformTestClassProcessorFactory implements WorkerTestClassProcessor
             Clock clock = serviceRegistry.get(Clock.class);
             ActorFactory actorFactory = serviceRegistry.get(ActorFactory.class);
             Class<?> clazz = getClass().getClassLoader().loadClass("org.gradle.api.internal.tasks.testing.junitplatform.JUnitPlatformTestClassProcessor");
-            Constructor<?> constructor = clazz.getConstructor(JUnitPlatformSpec.class, IdGenerator.class, ActorFactory.class, Clock.class);
-            return (TestClassProcessor) constructor.newInstance(spec, idGenerator, actorFactory, clock);
+            Constructor<?> constructor = clazz.getConstructor(JUnitPlatformSpec.class, IdGenerator.class, ActorFactory.class, Clock.class, RemoteTestClassStealer.class);
+            return (TestClassProcessor) constructor.newInstance(spec, idGenerator, actorFactory, clock, stealer);
         } catch (Exception e) {
             throw UncheckedException.throwAsUncheckedException(e);
         }
@@ -55,6 +56,7 @@ class JUnitPlatformTestClassProcessorFactory implements WorkerTestClassProcessor
 
     @Override
     public RemoteTestClassStealer buildWorkerStealer(RemoteTestClassStealer stealer) {
-        return null; // currently not supported, planned to delegate
+        this.stealer = stealer;
+        return null; // delegate
     }
 }

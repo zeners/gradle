@@ -17,6 +17,9 @@
 package org.gradle.api.internal.tasks.testing.junitplatform;
 
 import org.gradle.api.Action;
+import org.gradle.api.internal.tasks.testing.DefaultTestClassRunInfo;
+import org.gradle.api.internal.tasks.testing.RemoteTestClassStealer;
+import org.gradle.api.internal.tasks.testing.TestClassRunInfo;
 import org.gradle.api.internal.tasks.testing.TestResultProcessor;
 import org.gradle.api.internal.tasks.testing.filter.TestFilterSpec;
 import org.gradle.api.internal.tasks.testing.filter.TestSelectionMatcher;
@@ -48,6 +51,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.WillCloseWhenClosed;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -60,14 +64,16 @@ import static org.junit.platform.launcher.TagFilter.excludeTags;
 import static org.junit.platform.launcher.TagFilter.includeTags;
 
 public class JUnitPlatformTestClassProcessor extends AbstractJUnitTestClassProcessor {
+    private final RemoteTestClassStealer stealer;
     JUnitPlatformSpec spec;
     private CollectAllTestClassesExecutor testClassExecutor;
     private BackwardsCompatibleLauncherSession launcherSession;
     private ClassLoader junitClassLoader;
 
-    public JUnitPlatformTestClassProcessor(JUnitPlatformSpec spec, IdGenerator<?> idGenerator, ActorFactory actorFactory, Clock clock) {
+    public JUnitPlatformTestClassProcessor(JUnitPlatformSpec spec, IdGenerator<?> idGenerator, ActorFactory actorFactory, Clock clock, RemoteTestClassStealer stealer) {
         super(idGenerator, actorFactory, clock);
         this.spec = spec;
+        this.stealer = stealer;
     }
 
     @Override
@@ -93,10 +99,10 @@ public class JUnitPlatformTestClassProcessor extends AbstractJUnitTestClassProce
 
     private class CollectAllTestClassesExecutor implements Action<String> {
         private final List<Class<?>> testClasses = new ArrayList<>();
-        private final TestResultProcessor resultProcessor;
+        private final TestExecutionListener executionListener;
 
         CollectAllTestClassesExecutor(TestResultProcessor resultProcessor) {
-            this.resultProcessor = resultProcessor;
+            executionListener = new JUnitPlatformTestExecutionListener(resultProcessor, clock, idGenerator);
         }
 
         @Override
@@ -109,8 +115,30 @@ public class JUnitPlatformTestClassProcessor extends AbstractJUnitTestClassProce
         }
 
         private void processAllTestClasses() {
-            LauncherDiscoveryRequest discoveryRequest = createLauncherDiscoveryRequest(testClasses);
-            TestExecutionListener executionListener = new JUnitPlatformTestExecutionListener(resultProcessor, clock, idGenerator);
+            if (stealer != null) {
+                processAllTestClassesWithStealer();
+            } else {
+                processClasses(testClasses);
+            }
+        }
+
+        private void processAllTestClassesWithStealer() {
+            for (Class<?> testClass : testClasses) {
+                if (stealer.canStart(new DefaultTestClassRunInfo(testClass.getName()))) {
+                    processClasses(Collections.singletonList(testClass));
+                }
+            }
+            for (TestClassRunInfo runInfo = stealer.trySteal(); runInfo != null; runInfo = stealer.trySteal()) {
+                testClasses.clear();
+                execute(runInfo.getTestClassName());
+                if (!testClasses.isEmpty()) {
+                    processClasses(testClasses);
+                }
+            }
+        }
+
+        private void processClasses(List<Class<?>> testClass) {
+            LauncherDiscoveryRequest discoveryRequest = createLauncherDiscoveryRequest(testClass);
             Launcher launcher = launcherSession.getLauncher();
             if (spec.isDryRun()) {
                 TestPlan testPlan = launcher.discover(discoveryRequest);
@@ -159,7 +187,7 @@ public class JUnitPlatformTestClassProcessor extends AbstractJUnitTestClassProce
         }
     }
 
-    private boolean isInnerClass(Class<?> klass) {
+    private static boolean isInnerClass(Class<?> klass) {
         return klass.getEnclosingClass() != null && !Modifier.isStatic(klass.getModifiers());
     }
 
@@ -284,7 +312,7 @@ public class JUnitPlatformTestClassProcessor extends AbstractJUnitTestClassProce
 
         private boolean matchesParentMethod(TestDescriptor descriptor, String methodName) {
             return descriptor.getParent()
-                .flatMap(this::className)
+                .flatMap(ClassMethodNameFilter::className)
                 .filter(className -> matcher.matchesTest(className, methodName))
                 .isPresent();
         }
@@ -303,7 +331,7 @@ public class JUnitPlatformTestClassProcessor extends AbstractJUnitTestClassProce
             return false;
         }
 
-        private Optional<String> className(TestDescriptor descriptor) {
+        private static Optional<String> className(TestDescriptor descriptor) {
             return descriptor.getSource()
                 .filter(ClassSource.class::isInstance)
                 .map(ClassSource.class::cast)
