@@ -18,9 +18,12 @@ package org.gradle.api.internal.tasks.testing.detection;
 
 import org.gradle.api.file.FileTree;
 import org.gradle.api.internal.classpath.ModuleRegistry;
+import org.gradle.api.internal.tasks.testing.ClassTestDefinition;
+import org.gradle.api.internal.tasks.testing.JvmTestDefinitionStealer;
 import org.gradle.api.internal.tasks.testing.JvmTestExecutionSpec;
 import org.gradle.api.internal.tasks.testing.TestDefinition;
 import org.gradle.api.internal.tasks.testing.TestDefinitionProcessor;
+import org.gradle.api.internal.tasks.testing.TestDefinitionStealer;
 import org.gradle.api.internal.tasks.testing.TestExecuter;
 import org.gradle.api.internal.tasks.testing.TestFramework;
 import org.gradle.api.internal.tasks.testing.TestResultProcessor;
@@ -30,12 +33,14 @@ import org.gradle.api.internal.tasks.testing.processors.MaxNParallelTestDefiniti
 import org.gradle.api.internal.tasks.testing.processors.PatternMatchTestDefinitionProcessor;
 import org.gradle.api.internal.tasks.testing.processors.RestartEveryNTestDefinitionProcessor;
 import org.gradle.api.internal.tasks.testing.processors.RunPreviousFailedFirstTestDefinitionProcessor;
+import org.gradle.api.internal.tasks.testing.processors.SortingTestDefinitionProcessor;
 import org.gradle.api.internal.tasks.testing.processors.TestMainAction;
 import org.gradle.api.internal.tasks.testing.results.TestRetryShieldingTestResultProcessor;
 import org.gradle.api.internal.tasks.testing.worker.ForkedTestClasspath;
 import org.gradle.api.internal.tasks.testing.worker.ForkingTestDefinitionProcessor;
 import org.gradle.api.logging.Logger;
 import org.gradle.api.logging.Logging;
+import org.gradle.api.provider.MapProperty;
 import org.gradle.internal.Cast;
 import org.gradle.internal.Factory;
 import org.gradle.internal.actor.ActorFactory;
@@ -47,6 +52,7 @@ import org.gradle.util.internal.IncubationLogger;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -55,6 +61,7 @@ import java.util.Set;
 public class DefaultTestExecuter implements TestExecuter<JvmTestExecutionSpec> {
 
     private static final Logger LOGGER = Logging.getLogger(DefaultTestExecuter.class);
+    public static final TestDefinitionStealer.NoSteal<ClassTestDefinition> CLASS_TEST_DEFINITION_NO_STEAL = new TestDefinitionStealer.NoSteal<>();
 
     private final WorkerProcessFactory workerFactory;
     private final ActorFactory actorFactory;
@@ -63,12 +70,14 @@ public class DefaultTestExecuter implements TestExecuter<JvmTestExecutionSpec> {
     private final int maxWorkerCount;
     private final Clock clock;
     private final DefaultTestFilter testFilter;
+    private final MapProperty<String, Long> estimatedTestClassDurations;
     private TestDefinitionProcessor<TestDefinition> processor;
 
     public DefaultTestExecuter(
         WorkerProcessFactory workerFactory, ActorFactory actorFactory, ModuleRegistry moduleRegistry,
         WorkerLeaseService workerLeaseService, int maxWorkerCount,
-        Clock clock, DefaultTestFilter testFilter
+        Clock clock, DefaultTestFilter testFilter,
+        MapProperty<String, Long> estimatedTestClassDurations
     ) {
         this.workerFactory = workerFactory;
         this.actorFactory = actorFactory;
@@ -77,6 +86,7 @@ public class DefaultTestExecuter implements TestExecuter<JvmTestExecutionSpec> {
         this.maxWorkerCount = maxWorkerCount;
         this.clock = clock;
         this.testFilter = testFilter;
+        this.estimatedTestClassDurations = estimatedTestClassDurations;
     }
 
     @Override
@@ -93,13 +103,17 @@ public class DefaultTestExecuter implements TestExecuter<JvmTestExecutionSpec> {
             testExecutionSpec.getClasspath(),
             testExecutionSpec.getModulePath()
         );
-
-        final Factory<TestDefinitionProcessor<TestDefinition>> forkingProcessorFactory = () -> new ForkingTestDefinitionProcessor<>(workerLeaseService, workerFactory, testInstanceFactory, testExecutionSpec.getJavaForkOptions(), classpath, testFramework.getWorkerConfigurationAction());
+        int maxParallelForks = getMaxParallelForks(testExecutionSpec);
+        final TestDefinitionStealer<ClassTestDefinition> testDefinitionStealer = maxParallelForks == 1 ? CLASS_TEST_DEFINITION_NO_STEAL : new JvmTestDefinitionStealer();
+        final Factory<TestDefinitionProcessor<TestDefinition>> forkingProcessorFactory = () -> new ForkingTestDefinitionProcessor<>(workerLeaseService, workerFactory, testInstanceFactory, testExecutionSpec.getJavaForkOptions(), classpath, testFramework.getWorkerConfigurationAction(), testDefinitionStealer);
         final Factory<TestDefinitionProcessor<TestDefinition>> reforkingProcessorFactory = () -> new RestartEveryNTestDefinitionProcessor<>(forkingProcessorFactory, testExecutionSpec.getForkEvery());
-        processor =
-            new PatternMatchTestDefinitionProcessor<>(testFilter,
-                new RunPreviousFailedFirstTestDefinitionProcessor<>(testExecutionSpec.getPreviousFailedTestClasses(), Collections.emptySet(),
-                    new MaxNParallelTestDefinitionProcessor<>(getMaxParallelForks(testExecutionSpec), reforkingProcessorFactory, actorFactory)));
+
+        processor = new MaxNParallelTestDefinitionProcessor<>(maxParallelForks, reforkingProcessorFactory, actorFactory, maxParallelForks > 1 ? estimatedTestClassDurations.get() : Map.of());
+        processor = new RunPreviousFailedFirstTestDefinitionProcessor<>(testExecutionSpec.getPreviousFailedTestClasses(), Collections.emptySet(), processor);
+        if (maxParallelForks > 1 && !estimatedTestClassDurations.get().isEmpty()) {
+            processor = new SortingTestDefinitionProcessor<>(estimatedTestClassDurations.get(), processor);
+        }
+        processor = new PatternMatchTestDefinitionProcessor<>(testFilter, processor);
 
         final FileTree testClassFiles = testExecutionSpec.getCandidateClassFiles();
         final Set<File> testDefinitionDirs = testExecutionSpec.getCandidateTestDefinitionDirs();

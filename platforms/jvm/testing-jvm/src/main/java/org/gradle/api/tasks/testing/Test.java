@@ -39,11 +39,13 @@ import org.gradle.api.internal.tasks.testing.detection.DefaultTestExecuter;
 import org.gradle.api.internal.tasks.testing.filter.DefaultTestFilter;
 import org.gradle.api.internal.tasks.testing.junit.JUnitTestFramework;
 import org.gradle.api.internal.tasks.testing.junitplatform.JUnitPlatformTestFramework;
+import org.gradle.api.internal.tasks.testing.results.serializable.SerializableTestResult;
 import org.gradle.api.internal.tasks.testing.results.serializable.SerializableTestResultStore;
 import org.gradle.api.internal.tasks.testing.testng.TestNGTestFramework;
 import org.gradle.api.internal.tasks.testing.worker.TestWorker;
 import org.gradle.api.jvm.ModularitySpec;
 import org.gradle.api.model.ObjectFactory;
+import org.gradle.api.provider.MapProperty;
 import org.gradle.api.provider.Property;
 import org.gradle.api.provider.Provider;
 import org.gradle.api.provider.ProviderFactory;
@@ -99,6 +101,7 @@ import javax.inject.Inject;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -207,6 +210,7 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
         getJavaLauncher().finalizeValueOnRead();
         getDryRun().convention(false);
         testFramework = objectFactory.property(TestFramework.class).convention(objectFactory.newInstance(JUnitTestFramework.class, this.getFilter(), this.getTemporaryDirFactory(), this.getDryRun()));
+        getEstimatedTestDefinitionDurations().convention(getProviderFactory().provider(this::buildLastRunDurations));
     }
 
     private Provider<JavaLauncher> createJavaLauncherConvention() {
@@ -218,6 +222,34 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
             .flatMap((Transformer<Provider<JavaLauncher>, JavaToolchainSpec>) javaToolchainService::launcherFor)
             .orElse(javaToolchainService.launcherFor(javaToolchainSpec -> {}));
     }
+
+    /**
+     * compute estimated duration per test class name
+     *
+     * @return Map of estimated durations, build from last test run
+     * @since 8.2
+     */
+    @Incubating
+    protected Map<String, Long> buildLastRunDurations() {
+        final Map<String, Long> durations = new HashMap<>();
+        SerializableTestResultStore store = new SerializableTestResultStore(getBinaryResultsDirectory().getAsFile().get().toPath());
+        if (store.hasResults()) {
+            try {
+                store.forEachResult(testResult -> {
+                        SerializableTestResult innerResult = testResult.getInnerResult();
+                        String className = innerResult.getClassName();
+                        if (className != null) {
+                            durations.put(className, innerResult.getDuration());
+                        }
+                    }
+                );
+            } catch (Exception e) {
+                LOGGER.warn("Error while reading previous Test-Results", e);
+            }
+        }
+        return durations;
+    }
+
 
     /**
      * {@inheritDoc}
@@ -561,6 +593,13 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
     public abstract Property<Boolean> getDryRun();
 
     /**
+     * Durations used for planning TestWorker, using {@link #buildLastRunDurations} as convention
+     * @since 9.6.0
+     */
+    @Incubating
+    public abstract MapProperty<String, Long> getEstimatedTestDefinitionDurations();
+
+    /**
      * {@inheritDoc}
      */
     @Override
@@ -769,7 +808,8 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
                 getServices().get(WorkerLeaseService.class),
                 getServices().get(StartParameter.class).getMaxWorkerCount(),
                 getServices().get(Clock.class),
-                (DefaultTestFilter) getFilter());
+                (DefaultTestFilter) getFilter(),
+                getEstimatedTestDefinitionDurations());
         } else {
             return testExecuter;
         }
@@ -1005,6 +1045,7 @@ public abstract class Test extends AbstractTestTask implements JavaForkOptions, 
 
     /**
      * Do not call this method.
+     *
      * @deprecated This will be removed in Gradle 10
      */
     @Deprecated

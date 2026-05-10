@@ -16,8 +16,8 @@
 
 package org.gradle.api.internal.tasks.testing.processors;
 
-import org.gradle.api.internal.tasks.testing.TestDefinitionProcessor;
 import org.gradle.api.internal.tasks.testing.TestDefinition;
+import org.gradle.api.internal.tasks.testing.TestDefinitionProcessor;
 import org.gradle.api.internal.tasks.testing.TestResultProcessor;
 import org.gradle.internal.Cast;
 import org.gradle.internal.Factory;
@@ -29,6 +29,11 @@ import org.gradle.internal.dispatch.DispatchException;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.SortedSet;
+import java.util.TreeSet;
+
+import static java.util.Comparator.comparing;
 
 /**
  * Manages a set of parallel {@link TestDefinitionProcessor}s.
@@ -41,18 +46,25 @@ public class MaxNParallelTestDefinitionProcessor<D extends TestDefinition> imple
     // for full compatibility, but in practice we don't need it.
     private final Factory<TestDefinitionProcessor<D>> factory;
     private final ActorFactory actorFactory;
-    private TestResultProcessor resultProcessor;
-    private int pos;
+    private final Map<String, Long> estimatedTestClassDurations;
     private final List<TestDefinitionProcessor<D>> processors = new ArrayList<>();
     private final List<TestDefinitionProcessor<D>> rawProcessors = new ArrayList<>();
     private final List<Actor> actors = new ArrayList<Actor>();
+    private final SortedSet<EstimatedProcessorEntry<D>> estimatedProcessorDuration = new TreeSet<>(comparing(EstimatedProcessorEntry::getDuration));
+    private TestResultProcessor resultProcessor;
+    private int pos;
     private Actor resultProcessorActor;
     private volatile boolean stoppedNow;
 
     public MaxNParallelTestDefinitionProcessor(int maxProcessors, Factory<TestDefinitionProcessor<D>> factory, ActorFactory actorFactory) {
+        this(maxProcessors, factory, actorFactory, Map.of());
+    }
+
+    public MaxNParallelTestDefinitionProcessor(int maxProcessors, Factory<TestDefinitionProcessor<D>> factory, ActorFactory actorFactory, Map<String, Long> estimatedTestClassDurations) {
         this.maxProcessors = maxProcessors;
         this.factory = factory;
         this.actorFactory = actorFactory;
+        this.estimatedTestClassDurations = estimatedTestClassDurations;
     }
 
     @Override
@@ -68,6 +80,7 @@ public class MaxNParallelTestDefinitionProcessor<D extends TestDefinition> imple
             return;
         }
 
+        Long estimatedDuration = estimatedTestClassDurations.getOrDefault(testDefinition.getId(), 0L);
         TestDefinitionProcessor<D> processor;
         if (processors.size() < maxProcessors) {
             processor = factory.create();
@@ -77,9 +90,12 @@ public class MaxNParallelTestDefinitionProcessor<D extends TestDefinition> imple
             actors.add(actor);
             processors.add(processor);
             processor.startProcessing(resultProcessor);
-        } else {
+            estimatedProcessorDuration.add(new EstimatedProcessorEntry<>(processor, estimatedDuration));
+        } else if (estimatedDuration <= 0L) {
             processor = processors.get(pos);
             pos = (pos + 1) % processors.size();
+        } else {
+            processor = estimatedProcessorDuration.first().add(estimatedDuration);
         }
         processor.processTestDefinition(testDefinition);
     }
@@ -98,6 +114,32 @@ public class MaxNParallelTestDefinitionProcessor<D extends TestDefinition> imple
         stoppedNow = true;
         for (TestDefinitionProcessor<D> processor : rawProcessors) {
             processor.stopNow();
+        }
+    }
+
+    static class EstimatedProcessorEntry<D extends TestDefinition> {
+        final TestDefinitionProcessor<D> processor;
+        long duration;
+
+        public EstimatedProcessorEntry(TestDefinitionProcessor<D> processor, long duration) {
+            this.processor = processor;
+            this.duration = duration;
+        }
+
+        public TestDefinitionProcessor<D> getProcessor() {
+            return processor;
+        }
+        public TestDefinitionProcessor<D> add(long duration) {
+            this.duration +=duration;
+            return processor;
+        }
+
+        public long getDuration() {
+            return duration;
+        }
+
+        public void setDuration(long duration) {
+            this.duration = duration;
         }
     }
 }

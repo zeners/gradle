@@ -17,8 +17,9 @@
 package org.gradle.api.internal.tasks.testing.worker;
 
 import org.gradle.api.Action;
-import org.gradle.api.internal.tasks.testing.TestDefinitionProcessor;
 import org.gradle.api.internal.tasks.testing.TestDefinition;
+import org.gradle.api.internal.tasks.testing.TestDefinitionProcessor;
+import org.gradle.api.internal.tasks.testing.TestDefinitionStealer;
 import org.gradle.api.internal.tasks.testing.TestResultProcessor;
 import org.gradle.api.internal.tasks.testing.WorkerTestDefinitionProcessorFactory;
 import org.gradle.internal.Cast;
@@ -43,6 +44,7 @@ import org.gradle.process.internal.worker.WorkerProcessContext;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.security.AccessControlException;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -60,7 +62,7 @@ import java.util.concurrent.BlockingQueue;
  * any of the methods from {@link RemoteTestDefinitionProcessor} are supported, the commands will still be executed sequentially in the
  * main thread in order of arrival.
  */
-public class TestWorker<D extends TestDefinition> implements Action<WorkerProcessContext>, RemoteTestDefinitionProcessor<D>, Serializable, Stoppable {
+public class TestWorker<D extends TestDefinition> implements Action<WorkerProcessContext>, RemoteTestDefinitionProcessor<D>, TestDefinitionStealer.StealableWorker<D>, Serializable, Stoppable {
     private enum State {INITIALIZING, STARTED, STOPPED}
 
     private static final Logger LOGGER = LoggerFactory.getLogger(TestWorker.class);
@@ -70,8 +72,15 @@ public class TestWorker<D extends TestDefinition> implements Action<WorkerProces
 
     private final WorkerTestDefinitionProcessorFactory<D> factory;
     private final BlockingQueue<Runnable> runQueue = new ArrayBlockingQueue<Runnable>(1);
+    private final TestDefinitionStealer<D> testDefinitonStealer;
     private TestDefinitionProcessor<D> processor;
     private TestResultProcessor resultProcessor;
+    /**
+     * only on remote-site, before delegated
+     */
+    private transient TestDefinitionStealer<D> remoteStealer = null;
+    @Nullable
+    private transient RemoteStealer workerTestDefinitionStealer = null;
 
     /**
      * Note that the state object is not synchronized and not thread-safe.  Any modifications to the
@@ -80,8 +89,9 @@ public class TestWorker<D extends TestDefinition> implements Action<WorkerProces
      */
     private volatile State state = State.INITIALIZING;
 
-    public TestWorker(WorkerTestDefinitionProcessorFactory<D> factory) {
+    public TestWorker(WorkerTestDefinitionProcessorFactory<D> factory, TestDefinitionStealer<D> testDefinitonStealer) {
         this.factory = factory;
+        this.testDefinitonStealer = testDefinitonStealer;
     }
 
     @Override
@@ -131,6 +141,8 @@ public class TestWorker<D extends TestDefinition> implements Action<WorkerProces
     }
 
     private void startReceivingTests(WorkerProcessContext workerProcessContext, ServiceRegistry testServices) {
+        remoteStealer = new WorkerTestDefinitionStealer();
+        workerTestClassStealer = factory.buildWorkerStealer(remoteStealer);
         TestDefinitionProcessor<D> targetProcessor = factory.create(
             testServices.get(IdGenerator.class),
             testServices.get(ActorFactory.class),
@@ -148,6 +160,7 @@ public class TestWorker<D extends TestDefinition> implements Action<WorkerProces
         ObjectConnection serverConnection = workerProcessContext.getServerConnection();
         serverConnection.useParameterSerializers(TestEventSerializer.create());
         this.resultProcessor = serverConnection.addOutgoing(TestResultProcessor.class);
+        remoteStealer.setRemoteTestClassStealer(serverConnection.addOutgoing(RemoteStealer.class));
         serverConnection.addIncoming(RemoteTestDefinitionProcessor.class, this);
         serverConnection.connect();
     }
@@ -168,6 +181,7 @@ public class TestWorker<D extends TestDefinition> implements Action<WorkerProces
 
     @Override
     public void processTestDefinition(final D testDefinition) {
+        testDefinitonStealer.add(testDefinition, this);
         submitToRun(new Runnable() {
             @Override
             public void run() {
@@ -210,6 +224,20 @@ public class TestWorker<D extends TestDefinition> implements Action<WorkerProces
             } catch (InterruptedException e) {
                 throw UncheckedException.throwAsUncheckedException(e);
             }
+        }
+    }
+
+    @Override
+    public void handOver(D testDefinition) {
+        try {
+            if (state == State.STOPPED) {
+                testDefinitonStealer.handOverTestDefinition(this, testDefinition, false);
+            } else {
+                remoteStealer.handOverTestDefinition(testDefinition);
+            }
+        } catch (Exception e) {
+            // ignore
+            testDefinitonStealer.handOverTestDefinition(this, testDefinition, false);
         }
     }
 

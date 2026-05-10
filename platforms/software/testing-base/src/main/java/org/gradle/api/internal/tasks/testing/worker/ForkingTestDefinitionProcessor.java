@@ -17,8 +17,9 @@
 package org.gradle.api.internal.tasks.testing.worker;
 
 import org.gradle.api.Action;
-import org.gradle.api.internal.tasks.testing.TestDefinitionProcessor;
 import org.gradle.api.internal.tasks.testing.TestDefinition;
+import org.gradle.api.internal.tasks.testing.TestDefinitionProcessor;
+import org.gradle.api.internal.tasks.testing.TestDefinitionStealer;
 import org.gradle.api.internal.tasks.testing.TestResultProcessor;
 import org.gradle.api.internal.tasks.testing.WorkerTestDefinitionProcessorFactory;
 import org.gradle.internal.Cast;
@@ -54,6 +55,7 @@ public class ForkingTestDefinitionProcessor<D extends TestDefinition> implements
     private WorkerLeaseRegistry.WorkerLeaseCompletion completion;
     private boolean stoppedNow;
     private final Set<Throwable> unrecoverableExceptions = new HashSet<>();
+    private final TestDefinitionStealer<D> testDefinitionStealer;
 
 
     public ForkingTestDefinitionProcessor(
@@ -62,7 +64,8 @@ public class ForkingTestDefinitionProcessor<D extends TestDefinition> implements
         WorkerTestDefinitionProcessorFactory<D> processorFactory,
         JavaForkOptions options,
         ForkedTestClasspath classpath,
-        Action<WorkerProcessBuilder> buildConfigAction
+        Action<WorkerProcessBuilder> buildConfigAction,
+        TestDefinitionStealer<D> testDefinitionStealer
     ) {
         this.workerThreadRegistry = workerThreadRegistry;
         this.workerFactory = workerFactory;
@@ -70,6 +73,7 @@ public class ForkingTestDefinitionProcessor<D extends TestDefinition> implements
         this.options = options;
         this.classpath = classpath;
         this.buildConfigAction = buildConfigAction;
+        this.testDefinitionStealer = testDefinitionStealer;
     }
 
     @Override
@@ -103,7 +107,7 @@ public class ForkingTestDefinitionProcessor<D extends TestDefinition> implements
     }
 
     RemoteTestDefinitionProcessor<D> forkProcess() {
-        WorkerProcessBuilder builder = workerFactory.create(new TestWorker<>(processorFactory));
+        WorkerProcessBuilder builder = workerFactory.create(new TestWorker<>(processorFactory, testDefinitionStealer));
         builder.setBaseName(GRADLE_TEST_WORKER_NAME);
         builder.setImplementationClasspath(classpath.getImplementationClasspath());
         builder.applicationClasspath(classpath.getApplicationClasspath());
